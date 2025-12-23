@@ -108,9 +108,9 @@ constexpr int kTensorArenaSize = const_max<int>(
     99 * 1024,
 #endif
 #ifdef INCLUDE_MODEL_WAV2LETTER_PRUNED
-    // 32768 * 1024,  // 32MB
+     32768 * 1024,  // 32MB
     // 25000 * 1024,  // 25MB
-    650 * 1024,  // 650 KB
+    //650 * 1024,  // 650 KB
 #endif
     0 /* When no models defined, we don't need a tensor arena. */
 );

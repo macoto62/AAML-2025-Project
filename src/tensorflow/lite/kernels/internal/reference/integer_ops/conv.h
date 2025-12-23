@@ -16,12 +16,31 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
 
 #include <algorithm>
-
+#include <stdio.h>
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
-
+#include "cfu.h"
+#include "playground_util/print_params.h"
 namespace tflite {
 namespace reference_integer_ops {
+
+// CFU Opcodes
+#define CFU_OP_ACCUMULATE_PTRS 0
+#define CFU_OP_RESET_ACC       1
+#define CFU_OP_SET_IN_OFFSET   2
+#define CFU_OP_SET_FIL_OFFSET  3
+#define CFU_OP_GET_RESULT      4
+#define CFU_OP_SET_GLOBAL_INPUT 5
+#define CFU_OP_MACC_ACC0        6
+#define CFU_OP_MACC_ACC1        7
+#define CFU_OP_MACC_ACC2        8
+#define CFU_OP_MACC_ACC3        9
+#define CFU_OP_RESET_ALL_ACC    10
+#define CFU_OP_GET_ACC0         11
+#define CFU_OP_GET_ACC1         12
+#define CFU_OP_GET_ACC2         13
+#define CFU_OP_GET_ACC3         14
+  
 
 // Fixed-point per-channel-quantization convolution reference kernel.
 inline void ConvPerChannel(
@@ -73,15 +92,162 @@ inline void ConvPerChannel(
       const int in_y_origin = (out_y * stride_height) - pad_height;
       for (int out_x = 0; out_x < output_width; ++out_x) {
         const int in_x_origin = (out_x * stride_width) - pad_width;
-        for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
+        
+        cfu_op0(CFU_OP_SET_IN_OFFSET, input_offset, 0);
+        
+        int out_channel = 0;
+        // Optimized loop for 4 channels at a time
+        if (filters_per_group >= 4) {
+            for (; out_channel <= output_depth - 4; out_channel += 4) {
+                auto group = out_channel / filters_per_group;
+                cfu_op0(CFU_OP_RESET_ALL_ACC, 0, 0);
+                int32_t acc_remainder[4] = {0, 0, 0, 0};
+
+                for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+                    const int in_y = in_y_origin + dilation_height_factor * filter_y;
+                    for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+                        const int in_x = in_x_origin + dilation_width_factor * filter_x;
+
+                        // Zero padding check
+                        const bool is_point_inside_image =
+                            (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
+                            (in_y < input_height);
+
+                        if (!is_point_inside_image) {
+                            continue;
+                        }
+                        
+                        int in_channel = 0;
+                        for (; in_channel < filter_input_depth - 3; in_channel += 4) {
+                            const int8_t* src_input = input_data + Offset(input_shape, batch, in_y, in_x, in_channel + group * filter_input_depth);
+                            uint32_t packed_input;
+                            if (((uintptr_t)src_input & 0x3) == 0) {
+                                packed_input = *(const uint32_t*)(src_input);
+                            } else {
+                                const uint8_t* p_in = (const uint8_t*)src_input;
+                                packed_input = (uint32_t)(p_in[0]) | ((uint32_t)(p_in[1]) << 8) | ((uint32_t)(p_in[2]) << 16) | ((uint32_t)(p_in[3]) << 24);
+                            }
+                            cfu_op0(CFU_OP_SET_GLOBAL_INPUT, packed_input, 0);
+
+                            // Unrolled loop for k=0..3
+                            {
+                                // k=0
+                                const int8_t* src_filter = filter_data + Offset(filter_shape, out_channel + 0, filter_y, filter_x, in_channel);
+                                uint32_t packed_filter;
+                                if (((uintptr_t)src_filter & 0x3) == 0) {
+                                    packed_filter = *(const uint32_t*)(src_filter);
+                                } else {
+                                    const uint8_t* p_fil = (const uint8_t*)src_filter;
+                                    packed_filter = (uint32_t)(p_fil[0]) | ((uint32_t)(p_fil[1]) << 8) | ((uint32_t)(p_fil[2]) << 16) | ((uint32_t)(p_fil[3]) << 24);
+                                }
+                                cfu_op0(CFU_OP_MACC_ACC0, packed_filter, 0);
+                            }
+                            {
+                                // k=1
+                                const int8_t* src_filter = filter_data + Offset(filter_shape, out_channel + 1, filter_y, filter_x, in_channel);
+                                uint32_t packed_filter;
+                                if (((uintptr_t)src_filter & 0x3) == 0) {
+                                    packed_filter = *(const uint32_t*)(src_filter);
+                                } else {
+                                    const uint8_t* p_fil = (const uint8_t*)src_filter;
+                                    packed_filter = (uint32_t)(p_fil[0]) | ((uint32_t)(p_fil[1]) << 8) | ((uint32_t)(p_fil[2]) << 16) | ((uint32_t)(p_fil[3]) << 24);
+                                }
+                                cfu_op0(CFU_OP_MACC_ACC1, packed_filter, 0);
+                            }
+                            {
+                                // k=2
+                                const int8_t* src_filter = filter_data + Offset(filter_shape, out_channel + 2, filter_y, filter_x, in_channel);
+                                uint32_t packed_filter;
+                                if (((uintptr_t)src_filter & 0x3) == 0) {
+                                    packed_filter = *(const uint32_t*)(src_filter);
+                                } else {
+                                    const uint8_t* p_fil = (const uint8_t*)src_filter;
+                                    packed_filter = (uint32_t)(p_fil[0]) | ((uint32_t)(p_fil[1]) << 8) | ((uint32_t)(p_fil[2]) << 16) | ((uint32_t)(p_fil[3]) << 24);
+                                }
+                                cfu_op0(CFU_OP_MACC_ACC2, packed_filter, 0);
+                            }
+                            {
+                                // k=3
+                                const int8_t* src_filter = filter_data + Offset(filter_shape, out_channel + 3, filter_y, filter_x, in_channel);
+                                uint32_t packed_filter;
+                                if (((uintptr_t)src_filter & 0x3) == 0) {
+                                    packed_filter = *(const uint32_t*)(src_filter);
+                                } else {
+                                    const uint8_t* p_fil = (const uint8_t*)src_filter;
+                                    packed_filter = (uint32_t)(p_fil[0]) | ((uint32_t)(p_fil[1]) << 8) | ((uint32_t)(p_fil[2]) << 16) | ((uint32_t)(p_fil[3]) << 24);
+                                }
+                                cfu_op0(CFU_OP_MACC_ACC3, packed_filter, 0);
+                            }
+                        }
+                        
+                        for (; in_channel < filter_input_depth; in_channel++) {
+                            int32_t input_val = input_data[Offset(input_shape, batch, in_y, in_x, in_channel + group * filter_input_depth)];
+                            for (int k = 0; k < 4; ++k) {
+                                int32_t filter_val = filter_data[Offset(filter_shape, out_channel + k, filter_y, filter_x, in_channel)];
+                                acc_remainder[k] += filter_val * (input_val + input_offset);
+                            }
+                        }
+                    }
+                }
+                
+                // Unrolled output processing
+                {
+                    int k = 0;
+                    int32_t acc = cfu_op0(CFU_OP_GET_ACC0, 0, 0);
+                    acc += acc_remainder[k];
+                    if (bias_data) acc += bias_data[out_channel + k];
+                    acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_channel + k], output_shift[out_channel + k]);
+                    acc += output_offset;
+                    acc = std::max(acc, output_activation_min);
+                    acc = std::min(acc, output_activation_max);
+                    output_data[Offset(output_shape, batch, out_y, out_x, out_channel + k)] = static_cast<int8_t>(acc);
+                }
+                {
+                    int k = 1;
+                    int32_t acc = cfu_op0(CFU_OP_GET_ACC1, 0, 0);
+                    acc += acc_remainder[k];
+                    if (bias_data) acc += bias_data[out_channel + k];
+                    acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_channel + k], output_shift[out_channel + k]);
+                    acc += output_offset;
+                    acc = std::max(acc, output_activation_min);
+                    acc = std::min(acc, output_activation_max);
+                    output_data[Offset(output_shape, batch, out_y, out_x, out_channel + k)] = static_cast<int8_t>(acc);
+                }
+                {
+                    int k = 2;
+                    int32_t acc = cfu_op0(CFU_OP_GET_ACC2, 0, 0);
+                    acc += acc_remainder[k];
+                    if (bias_data) acc += bias_data[out_channel + k];
+                    acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_channel + k], output_shift[out_channel + k]);
+                    acc += output_offset;
+                    acc = std::max(acc, output_activation_min);
+                    acc = std::min(acc, output_activation_max);
+                    output_data[Offset(output_shape, batch, out_y, out_x, out_channel + k)] = static_cast<int8_t>(acc);
+                }
+                {
+                    int k = 3;
+                    int32_t acc = cfu_op0(CFU_OP_GET_ACC3, 0, 0);
+                    acc += acc_remainder[k];
+                    if (bias_data) acc += bias_data[out_channel + k];
+                    acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_channel + k], output_shift[out_channel + k]);
+                    acc += output_offset;
+                    acc = std::max(acc, output_activation_min);
+                    acc = std::min(acc, output_activation_max);
+                    output_data[Offset(output_shape, batch, out_y, out_x, out_channel + k)] = static_cast<int8_t>(acc);
+                }
+            }
+        }
+
+        for (; out_channel < output_depth; ++out_channel) {
           auto group = out_channel / filters_per_group;
           int32_t acc = 0;
+          cfu_op0(CFU_OP_RESET_ACC, 0, 0);
           for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
             const int in_y = in_y_origin + dilation_height_factor * filter_y;
             for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
               const int in_x = in_x_origin + dilation_width_factor * filter_x;
 
-              // Zero padding by omitting the areas outside the image.
+              // Zero padding check
               const bool is_point_inside_image =
                   (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
                   (in_y < input_height);
@@ -89,35 +255,39 @@ inline void ConvPerChannel(
               if (!is_point_inside_image) {
                 continue;
               }
+              
+              int in_channel = 0;
+              for (; in_channel < filter_input_depth - 3; in_channel += 4) {
+                
+                const int8_t* src_input = input_data + Offset(input_shape, batch, in_y, in_x, in_channel + group * filter_input_depth);
+                const int8_t* src_filter = filter_data + Offset(filter_shape, out_channel, filter_y, filter_x, in_channel);
 
-              for (int in_channel = 0; in_channel < filter_input_depth;
-                   ++in_channel) {
-                int32_t input_val =
-                    input_data[Offset(input_shape, batch, in_y, in_x,
-                                      in_channel + group * filter_input_depth)];
-                int32_t filter_val = filter_data[Offset(
-                    filter_shape, out_channel, filter_y, filter_x, in_channel)];
-                // Accumulate with 32 bits accumulator.
-                // In the nudging process during model quantization, we force
-                // real value of 0.0 be represented by a quantized value. This
-                // guarantees that the input_offset is a int8_t, even though
-                // it is represented using int32_t. int32_t += int8_t *
-                // (int8_t - int8_t) so the highest value we can get from each
-                // accumulation is [-127, 127] * ([-128, 127] -
-                // [-128, 127]), which is [-32512, 32512]. log2(32512)
-                // = 14.98, which means we can accumulate at least 2^16
-                // multiplications without overflow. The accumulator is
-                // applied to a filter so the accumulation logic will hold as
-                // long as the filter size (filter_y * filter_x * in_channel)
-                // does not exceed 2^16, which is the case in all the models
-                // we have seen so far.
-                // TODO(b/174275578): Add a check to make sure the
-                // accumulator depth is smaller than 2^16.
+                uint32_t packed_input;
+                uint32_t packed_filter;
+                if ( (((uintptr_t)src_input & 0x3) == 0) && (((uintptr_t)src_filter & 0x3) == 0) ) {
+                  // Fast Path
+                  packed_input = *(const uint32_t*)(src_input);
+                  packed_filter = *(const uint32_t*)(src_filter);
+                } else {
+                    // Safe Path (Manual Packing to avoid unaligned access faults)
+                    const uint8_t* p_in = (const uint8_t*)src_input;
+                    packed_input = (uint32_t)(p_in[0]) | ((uint32_t)(p_in[1]) << 8) | ((uint32_t)(p_in[2]) << 16) | ((uint32_t)(p_in[3]) << 24);
+
+                    const uint8_t* p_fil = (const uint8_t*)src_filter;
+                    packed_filter = (uint32_t)(p_fil[0]) | ((uint32_t)(p_fil[1]) << 8) | ((uint32_t)(p_fil[2]) << 16) | ((uint32_t)(p_fil[3]) << 24);
+                }
+
+                cfu_op0(CFU_OP_ACCUMULATE_PTRS,  packed_input , packed_filter);
+            }
+              
+              for (; in_channel < filter_input_depth; in_channel++) {
+                int32_t input_val = input_data[Offset(input_shape, batch, in_y, in_x, in_channel + group * filter_input_depth)];
+                int32_t filter_val = filter_data[Offset(filter_shape, out_channel, filter_y, filter_x, in_channel)];
                 acc += filter_val * (input_val + input_offset);
               }
             }
           }
-
+          acc += cfu_op0(CFU_OP_GET_RESULT, 0, 0);
           if (bias_data) {
             acc += bias_data[out_channel];
           }
@@ -132,6 +302,7 @@ inline void ConvPerChannel(
       }
     }
   }
+
 }
 
 inline void ConvPerChannelWithPackedInt4Weights(
